@@ -103,7 +103,7 @@ services:
       - "pangolin.domain=prod.codifybites.com"
       - "pangolin.subdomain=deploystack"
       - "pangolin.rules=ACCEPT|CIDR|192.168.101.0/24,ACCEPT|CIDR|192.168.102.0/24,ACCEPT|CIDR|172.18.0.0/16,ACCEPT|CIDR|172.30.0.0/16"
-      - "pangolin.services=http:deploystack-gateway:80"
+      - "pangolin.services=http:gateway:80"
 
 networks:
   deploystack-net:
