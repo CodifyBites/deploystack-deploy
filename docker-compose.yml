@@ -23,7 +23,7 @@ services:
       - POSTGRES_USER=deploystack
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?postgres password required}
     volumes:
-      - /docker/appdata/deploystack/postgres:/var/lib/postgresql/data
+      - /docker/appdata/deploystack/postgres:/var/lib/postgresql
     networks:
       - deploystack-net
     restart: unless-stopped
