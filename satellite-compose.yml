@@ -1,0 +1,48 @@
+# DeployStack Satellite — post-setup deployment template
+#
+# DO NOT DEPLOY until the main DeployStack stack is up and an admin has
+# generated a satellite registration token in the DeployStack UI
+# (Admin -> Satellites). The token only exists after first-run setup;
+# this template intentionally has no token value.
+#
+# Public route (created after pairing, not by this repo's CI):
+#   deploystack-satellite.prod.codifybites.com -> satellite
+#
+# Upstream reference:
+#   https://github.com/deploystackio/deploystack/tree/main/services/satellite
+
+services:
+  satellite:
+    image: docker.io/deploystack/satellite:latest
+    container_name: deploystack-satellite
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      # Backend URL (public API route of the main stack):
+      - DEPLOYSTACK_BACKEND_URL=https://deploystack-api.prod.codifybites.com
+      # Unique satellite name (10-32 chars, lowercase):
+      - DEPLOYSTACK_SATELLITE_NAME=codifybites-satellite-01
+      # JWT registration token from the DeployStack admin UI. REQUIRED.
+      # Generate it AFTER main-stack setup; never commit the value.
+      - DEPLOYSTACK_REGISTRATION_TOKEN=${DEPLOYSTACK_REGISTRATION_TOKEN:?satellite registration token required (generate in DeployStack admin after setup)}
+      # nsjail defaults are fine; see upstream satellite README for tuning.
+    volumes:
+      # Registration state (backend.key.json) persists across restarts.
+      - /docker/appdata/deploystack/satellite:/app/persistent_data
+      # The satellite spawns MCP server processes and needs the host runtimes
+      # (node, npm, python3, uvx) — mount the host binaries if the image does
+      # not bundle them. Verify against the upstream image before first run.
+      # - /usr/local/bin:/usr/local/bin:ro
+      # - /usr/bin:/usr/bin:ro
+    networks:
+      - proxy
+    restart: unless-stopped
+    # NOTE: the satellite must reach the backend over the public API URL;
+    # keeping it on `proxy` gives it the reverse-proxy path. Do not attach it
+    # to deploystack-net of the main stack unless you change
+    # DEPLOYSTACK_BACKEND_URL to http://deploystack-backend:3000 instead.
+
+networks:
+  proxy:
+    external: true
+    name: proxy

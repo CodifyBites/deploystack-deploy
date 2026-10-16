@@ -1,0 +1,102 @@
+# DeployStack deployment for the CodifyBites homelab.
+#
+# Derived from the upstream compose at
+#   https://github.com/deploystackio/deploystack/blob/main/docker-compose.yml
+# adapted for Arcane (environment 0 / CodeServer) + Pangolin reverse proxy.
+#
+# Changes vs upstream:
+#   - bind-mount persistence under /docker/appdata/deploystack (no named
+#     volumes for application data)
+#   - external `proxy` network for frontend/backend; private `deploystack-net`
+#     for postgres (backend attached to both)
+#   - no published host ports; public access is via Pangolin routes only
+#   - public https URLs for frontend<->backend cross-references
+#   - Arcane + Pangolin labels on the proxied services
+#   - secrets required, not defaulted (${VAR:?error})
+
+services:
+  postgres:
+    image: docker.io/library/postgres:18-alpine
+    container_name: deploystack-postgres
+    environment:
+      - POSTGRES_DB=deploystack
+      - POSTGRES_USER=deploystack
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?postgres password required}
+    volumes:
+      - /docker/appdata/deploystack/postgres:/var/lib/postgresql/data
+    networks:
+      - deploystack-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deploystack -d deploystack"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  backend:
+    image: docker.io/deploystack/backend:latest
+    container_name: deploystack-backend
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DEPLOYSTACK_FRONTEND_URL=https://deploystack.prod.codifybites.com
+      - DEPLOYSTACK_ENCRYPTION_SECRET=${DEPLOYSTACK_ENCRYPTION_SECRET:?encryption secret required}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DATABASE=deploystack
+      - POSTGRES_USER=deploystack
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?postgres password required}
+      - POSTGRES_SSL=false
+    volumes:
+      - /docker/appdata/deploystack/backend:/app/persistent_data
+    networks:
+      - deploystack-net
+      - proxy
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "arcane.server.hosts=CodeServer"
+      - "pangolin.enable=true"
+      - "pangolin.protected=true"
+      - "pangolin.domain=prod.codifybites.com"
+      - "pangolin.subdomain=deploystack-api"
+      - "pangolin.rules=ACCEPT|CIDR|192.168.101.0/24,ACCEPT|CIDR|192.168.102.0/24,ACCEPT|CIDR|172.18.0.0/16,ACCEPT|CIDR|172.30.0.0/16"
+      - "pangolin.services=http:deploystack-backend:3000"
+
+  frontend:
+    image: docker.io/deploystack/frontend:latest
+    container_name: deploystack-frontend
+    environment:
+      - VITE_DEPLOYSTACK_BACKEND_URL=https://deploystack-api.prod.codifybites.com
+      - VITE_APP_TITLE=DeployStack
+    networks:
+      - deploystack-net
+      - proxy
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    labels:
+      - "arcane.server.hosts=CodeServer"
+      - "pangolin.enable=true"
+      - "pangolin.protected=true"
+      - "pangolin.domain=prod.codifybites.com"
+      - "pangolin.subdomain=deploystack"
+      - "pangolin.rules=ACCEPT|CIDR|192.168.101.0/24,ACCEPT|CIDR|192.168.102.0/24,ACCEPT|CIDR|172.18.0.0/16,ACCEPT|CIDR|172.30.0.0/16"
+      - "pangolin.services=http:deploystack-frontend:80"
+
+networks:
+  deploystack-net:
+    driver: bridge
+  proxy:
+    external: true
+    name: proxy

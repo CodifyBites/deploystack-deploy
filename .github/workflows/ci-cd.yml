@@ -1,0 +1,209 @@
+# CI/CD for the DeployStack stack.
+#
+# GitHub Actions is the ACTIVE full deployment path, matching the pattern of
+# the other CodifyBites stack repos: the deploy job runs the shared Arcane
+# GitOps script (scripts/AddOrUpdateArcane.py) which creates/refreshes the
+# Arcane git repository and GitOps sync, triggers a sync, and waits for the
+# project to run, then runs the Pangolin reconciliation
+# (scripts/UpdateOrCreatePangolinConfig.py) so routes, rules, targets and
+# roles match the compose labels.
+#
+# Runner: self-hosted with labels [self-hosted, codeserver] (the Docker host).
+#
+# Required GitHub secrets (see README.md): ARCANE_API_KEY,
+# ARCANE_GIT_USERNAME, ARCANE_GIT_TOKEN, PANGOLIN_ORG_KEY, PANGOLIN_ORG_ID.
+#
+# NOTE: deployment additionally requires POSTGRES_PASSWORD and
+# DEPLOYSTACK_ENCRYPTION_SECRET to be set as protected environment variables
+# in the Arcane project (see README.md); they are NOT stored in this repo.
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate YAML and Docker Compose
+    runs-on: [self-hosted, codeserver]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Parse all YAML files
+        run: |
+          docker run --rm -i -v "$PWD":/ci:ro -w /ci python:3.12-alpine sh -s <<'EOF'
+          pip install --quiet pyyaml
+          python - <<'PY'
+          import glob
+          import sys
+
+          import yaml
+
+          paths = sorted(
+              set(
+                  glob.glob("*.yml")
+                  + glob.glob("*.yaml")
+                  + glob.glob(".github/workflows/*.yml")
+                  + glob.glob(".github/workflows/*.yaml")
+              )
+          )
+          if not paths:
+              sys.exit("no YAML files found to validate")
+          for path in paths:
+              with open(path, encoding="utf-8") as handle:
+                  yaml.safe_load(handle)
+              print("parsed OK:", path)
+          PY
+          EOF
+
+      - name: Docker Compose config check (throwaway placeholder env)
+        run: |
+          set -eu
+          placeholder_env="$(mktemp)"
+          # Variables the compose file marks as required (${VAR:?...}) get
+          # throwaway values so the config resolves without any real secrets.
+          for f in docker-compose.yml satellite-compose.yml; do
+            : > "$placeholder_env"
+            grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*:\?' "$f" \
+              | sed -E 's/^\$\{//; s/:\?$//' | sort -u | while read -r var; do
+                printf '%s=ci-placeholder\n' "$var" >> "$placeholder_env"
+              done
+            # --quiet prints nothing on success; the resolved config is never displayed.
+            docker compose --env-file "$placeholder_env" -f "$f" config --quiet \
+              || { echo "::error::$f failed compose config validation"; exit 1; }
+            echo "compose OK: $f"
+          done
+          rm -f "$placeholder_env"
+
+  deploy:
+    name: Deploy (Arcane GitOps roll-out + Pangolin reconcile)
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, codeserver]
+    needs: validate
+    timeout-minutes: 30
+    env:
+      # Explicit identity for the Arcane project and compose file location.
+      SERVICE_NAME: deploystack
+      COMPOSE_FILE_PATH: docker-compose.yml
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deployment script requirements
+        run: pip install --quiet -r scripts/requirements.txt
+
+      # Fail fast, with an actionable message, before any API call.
+      - name: Verify required Arcane secrets are present
+        env:
+          ARCANE_API_KEY: ${{ secrets.ARCANE_API_KEY }}
+          ARCANE_GIT_USERNAME: ${{ secrets.ARCANE_GIT_USERNAME }}
+          ARCANE_GIT_TOKEN: ${{ secrets.ARCANE_GIT_TOKEN }}
+        run: |
+          set -eu
+          missing=0
+          for v in ARCANE_API_KEY ARCANE_GIT_USERNAME ARCANE_GIT_TOKEN; do
+            if [ -z "$(eval echo \$$v)" ]; then
+              echo "::error::$v secret is missing. Set it as a repository/organization secret."
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ] || exit 1
+
+      # Full GitOps deployment: ensures the Arcane git repository (cloned with
+      # the separate ARCANE_GIT_USERNAME/ARCANE_GIT_TOKEN fields - never a
+      # token in the URL), ensures the GitOps sync exists (creating it if
+      # missing), triggers a sync, brings the project up and waits for the
+      # containers. Fails closed on any error.
+      - name: Deploy via Arcane GitOps
+        env:
+          ARCANE_API_KEY: ${{ secrets.ARCANE_API_KEY }}
+          ARCANE_GIT_USERNAME: ${{ secrets.ARCANE_GIT_USERNAME }}
+          ARCANE_GIT_TOKEN: ${{ secrets.ARCANE_GIT_TOKEN }}
+          ARCANE_BASE_URL: ${{ vars.ARCANE_BASE_URL || 'https://arcane.prod.codifybites.com' }}
+        run: python scripts/AddOrUpdateArcane.py
+
+      # Reconcile Pangolin resources (routes/rules/targets/roles) from the
+      # compose labels. Fails closed on API errors or invalid labels.
+      - name: Verify required Pangolin secrets are present
+        env:
+          PANGOLIN_ORG_KEY: ${{ secrets.PANGOLIN_ORG_KEY }}
+          PANGOLIN_ORG_ID: ${{ secrets.PANGOLIN_ORG_ID }}
+        run: |
+          set -eu
+          missing=0
+          for v in PANGOLIN_ORG_KEY PANGOLIN_ORG_ID; do
+            if [ -z "$(eval echo \$$v)" ]; then
+              echo "::error::$v secret is missing. Set it as a repository/organization secret."
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ] || exit 1
+
+      - name: Reconcile Pangolin resources from compose labels
+        env:
+          PANGOLIN_ORG_KEY: ${{ secrets.PANGOLIN_ORG_KEY }}
+          PANGOLIN_ORG_ID: ${{ secrets.PANGOLIN_ORG_ID }}
+          PANGOLIN_API_BASE_URL: ${{ vars.PANGOLIN_API_BASE_URL || 'https://api-pangolin.prod.codifybites.com/v1' }}
+        run: python scripts/UpdateOrCreatePangolinConfig.py
+
+  verify:
+    name: Verify deployment health
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, codeserver]
+    needs: deploy
+    env:
+      HEALTHCHECK_URL: ${{ vars.DEPLOYSTACK_HEALTHCHECK_URL }}
+    steps:
+      - name: Wait for services and check health
+        run: |
+          set -eu
+          deadline=$((SECONDS + 600))
+
+          if [ -n "${HEALTHCHECK_URL:-}" ]; then
+            echo "Using configured health endpoint: ${HEALTHCHECK_URL}"
+            until curl -fsS --max-time 10 "${HEALTHCHECK_URL}" >/dev/null 2>&1; do
+              if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "::error::Health endpoint did not turn healthy in time: ${HEALTHCHECK_URL}"
+                exit 1
+              fi
+              sleep 10
+            done
+            echo "Health endpoint OK."
+            exit 0
+          fi
+
+          echo "No DEPLOYSTACK_HEALTHCHECK_URL repository variable set;"
+          echo "falling back to local container checks on the runner host."
+          check_running() {
+            docker ps --filter "name=$1" --filter "status=running" --format '{{.Names}}' | grep -q .
+          }
+          check_healthy() {
+            docker ps --filter "name=$1" --filter "health=healthy" --format '{{.Names}}' | grep -q .
+          }
+          wait_for() {
+            kind="$1"; name="$2"
+            while :; do
+              if [ "$kind" = healthy ] && check_healthy "$name"; then return 0; fi
+              if [ "$kind" = running ] && check_running "$name"; then return 0; fi
+              if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "::error::Container '${name}' did not reach state '${kind}' within 10 minutes."
+                echo "Either set the DEPLOYSTACK_HEALTHCHECK_URL repository variable to a real"
+                echo "health endpoint, or make sure this runner shares the Docker host with the stack."
+                return 1
+              fi
+              sleep 10
+            done
+          }
+          # postgres and backend define compose healthchecks; frontend does not.
+          wait_for healthy deploystack-postgres
+          wait_for healthy deploystack-backend
+          wait_for running deploystack-frontend
+          echo "All DeployStack containers up."
