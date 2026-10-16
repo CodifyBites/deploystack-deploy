@@ -76,7 +76,7 @@ services:
     image: docker.io/deploystack/frontend:latest
     container_name: deploystack-frontend
     environment:
-      - VITE_DEPLOYSTACK_BACKEND_URL=https://deploystack-api.prod.codifybites.com
+      - VITE_DEPLOYSTACK_BACKEND_URL=https://deploystack.prod.codifybites.com/api
       - VITE_APP_TITLE=DeployStack
     networks:
       - deploystack-net
