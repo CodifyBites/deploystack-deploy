@@ -1,0 +1,30 @@
+# Caddy gateway for the DeployStack stack.
+#
+# Single ingress for https://deploystack.prod.codifybites.com: Pangolin
+# terminates TLS on the external `proxy` network and forwards plain HTTP to
+# this gateway, which paths-split onto the private stack:
+#
+#   /api/* -> deploystack-backend:3000   (REST + SSE; streaming-safe)
+#   /*     -> deploystack-frontend:80    (SPA)
+#
+# Caddy is a reverse proxy only here (no auto-TLS), so there is no ACME or
+# email config.
+
+:80 {
+	# Backend API first: SSE streams (e.g. /api/teams/.../installations/stream)
+	# need unbuffered pass-through. flush_interval -1 disables Caddy response
+	# buffering; HTTP/1.1 upstream avoids HTTP/2 connection-level flow control
+	# stalling long-lived event streams. Host/cookies/Authorization headers
+	# pass through by default.
+	handle_path /api/* {
+		reverse_proxy http://deploystack-backend:3000 {
+			flush_interval -1
+			transport http {
+				versions 1.1
+			}
+		}
+	}
+
+	# Frontend SPA last.
+	reverse_proxy http://deploystack-frontend:80
+}

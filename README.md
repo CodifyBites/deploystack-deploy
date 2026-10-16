@@ -12,11 +12,22 @@ Upstream license is preserved in [LICENSE](LICENSE); DeployStack is
 
 | URL | Service | Notes |
 |---|---|---|
-| https://deploystack.prod.codifybites.com | frontend | UI, Pangolin-protected |
-| https://deploystack-api.prod.codifybites.com | backend | REST API, Pangolin-protected |
-| https://deploystack-satellite.prod.codifybites.com | satellite | created AFTER pairing — see below |
+| https://deploystack.prod.codifybites.com | Caddy gateway | UI + API, Pangolin-protected |
 
-Both routes are `pangolin.protected=true` with the standard LAN/internal
+The single route terminates at the **Caddy gateway** (`deploystack-gateway:80`),
+which paths-splits internally (see `Caddyfile`):
+
+- `/api/*` → `deploystack-backend:3000` — unbuffered (`flush_interval -1`),
+  HTTP/1.1 upstream, so SSE streams (e.g. installations) pass through intact.
+- everything else → `deploystack-frontend:80`.
+
+The frontend keeps `VITE_DEPLOYSTACK_BACKEND_URL=https://deploystack.prod.codifybites.com`
+(the app appends `/api`), so the browser talks to one origin and no
+path-based routing happens at the Pangolin layer. The former separate
+`deploystack-api` backend route was removed: one resource, one target, one
+gateway.
+
+The route is `pangolin.protected=true` with the standard LAN/internal
 accept rules (192.168.101.0/24, 192.168.102.0/24, 172.18.0.0/16,
 172.30.0.0/16), matching the pattern of the other CodifyBites stacks.
 
@@ -101,7 +112,8 @@ compose. After setup:
 ## Layout
 
 ```
-docker-compose.yml       # main stack (postgres, backend, frontend)
+docker-compose.yml       # main stack (postgres, backend, frontend, caddy gateway)
+Caddyfile                # gateway routing: /api/* -> backend, /* -> frontend
 satellite-compose.yml    # post-setup satellite template (no token included)
 .env.example             # required variable names only
 .github/workflows/ci-cd.yml

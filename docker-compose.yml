@@ -7,8 +7,10 @@
 # Changes vs upstream:
 #   - bind-mount persistence under /docker/appdata/deploystack (no named
 #     volumes for application data)
-#   - external `proxy` network for frontend/backend; private `deploystack-net`
-#     for postgres (backend attached to both)
+#   - private `deploystack-net` for the stack (postgres, backend, frontend);
+#     external `proxy` network ONLY for the Caddy gateway, which paths-splits
+#     /api/* -> backend:3000 (SSE-safe) and /* -> frontend:80, and is the
+#     single Pangolin target for deploystack.prod.codifybites.com
 #   - no published host ports; public access is via Pangolin routes only
 #   - public https URLs for frontend<->backend cross-references
 #   - Arcane + Pangolin labels on the proxied services
@@ -52,7 +54,6 @@ services:
       - /docker/appdata/deploystack/backend:/app/persistent_data
     networks:
       - deploystack-net
-      - proxy
     restart: unless-stopped
     depends_on:
       postgres:
@@ -63,14 +64,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-    labels:
-      - "arcane.server.hosts=CodeServer"
-      - "pangolin.enable=true"
-      - "pangolin.protected=true"
-      - "pangolin.domain=prod.codifybites.com"
-      - "pangolin.subdomain=deploystack-api"
-      - "pangolin.rules=ACCEPT|CIDR|192.168.101.0/24,ACCEPT|CIDR|192.168.102.0/24,ACCEPT|CIDR|172.18.0.0/16,ACCEPT|CIDR|172.30.0.0/16"
-      - "pangolin.services=http:deploystack-backend:3000"
 
   frontend:
     image: docker.io/deploystack/frontend:latest
@@ -80,11 +73,29 @@ services:
       - VITE_APP_TITLE=DeployStack
     networks:
       - deploystack-net
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # Streaming-aware gateway: the ONLY service exposed to Pangolin. Splits
+  # /api/* to the backend (SSE-safe: unbuffered, HTTP/1.1 upstream) and
+  # everything else to the frontend, so path-based routing never happens at
+  # the Pangolin layer. See Caddyfile.
+  gateway:
+    image: docker.io/library/caddy:2.11
+    container_name: deploystack-gateway
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      - deploystack-net
       - proxy
     restart: unless-stopped
     depends_on:
       backend:
         condition: service_healthy
+      frontend:
+        condition: service_started
     labels:
       - "arcane.server.hosts=CodeServer"
       - "pangolin.enable=true"
@@ -92,7 +103,7 @@ services:
       - "pangolin.domain=prod.codifybites.com"
       - "pangolin.subdomain=deploystack"
       - "pangolin.rules=ACCEPT|CIDR|192.168.101.0/24,ACCEPT|CIDR|192.168.102.0/24,ACCEPT|CIDR|172.18.0.0/16,ACCEPT|CIDR|172.30.0.0/16"
-      - "pangolin.services=http:deploystack-frontend:80"
+      - "pangolin.services=http:deploystack-gateway:80"
 
 networks:
   deploystack-net:
